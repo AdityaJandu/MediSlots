@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart'
-    show kIsWeb; // Critical for Web detection
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'booking_screen.dart';
-import 'login_screen.dart'; // Needed for Logout if you don't use AuthWrapper
+import 'patient_appointments_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,7 +19,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   String? _error;
 
-  // 📍 DEFAULT LOCATION (New Delhi) - Fallback if GPS fails
+  // 📍 Fallback Location (New Delhi)
   final double _defaultLat = 28.6139;
   final double _defaultLong = 77.2090;
 
@@ -36,7 +35,6 @@ class _HomeScreenState extends State<HomeScreen> {
     bool usedFallback = false;
 
     try {
-      // 1. Check & Request Permissions
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -47,18 +45,11 @@ class _HomeScreenState extends State<HomeScreen> {
         throw "Permission denied";
       }
 
-      // 2. Configure Settings based on Platform
       LocationSettings locationSettings;
-
       if (kIsWeb) {
-        // ✅ WEB FIX: Browsers often fail with 'high' accuracy because they lack GPS chips.
-        // We use 'low' (City level) or 'balanced' which relies on Wi-Fi IP.
         locationSettings = const LocationSettings(
-          accuracy: LocationAccuracy.low,
-          distanceFilter: 100,
-        );
+            accuracy: LocationAccuracy.low, distanceFilter: 100);
       } else {
-        // 📱 MOBILE: High accuracy is fine, but we add a timeout to prevent hanging.
         locationSettings = const LocationSettings(
           accuracy: LocationAccuracy.high,
           distanceFilter: 100,
@@ -66,22 +57,16 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }
 
-      // 3. Get Position
       Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+        desiredAccuracy: locationSettings.accuracy,
       );
-
       userLat = position.latitude;
       userLong = position.longitude;
     } catch (e) {
-      // 4. Fallback Handling
-      // If GPS fails (common on Web or Emulators), we catch the error
-      // but CONTINUING using the default coordinates so the app doesn't break.
       print("GPS Error: $e. Using default location.");
       usedFallback = true;
     }
 
-    // 5. Call Supabase RPC
     try {
       final List<dynamic> data = await _supabase.rpc(
         'get_nearby_doctors',
@@ -100,14 +85,10 @@ class _HomeScreenState extends State<HomeScreen> {
         });
 
         if (usedFallback) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text(
                   "GPS unavailable. Showing doctors near default location."),
-              backgroundColor: Colors.orange,
-              duration: Duration(seconds: 4),
-            ),
-          );
+              backgroundColor: Colors.orange));
         }
       }
     } catch (e) {
@@ -121,12 +102,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openMap(double lat, double long) async {
-    // Web-compatible Google Maps URL
     final googleUrl =
         Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$long');
-    if (await canLaunchUrl(googleUrl)) {
-      await launchUrl(googleUrl);
-    }
+    if (await canLaunchUrl(googleUrl)) await launchUrl(googleUrl);
   }
 
   @override
@@ -144,20 +122,49 @@ class _HomeScreenState extends State<HomeScreen> {
               accountName: const Text("Welcome"),
               accountEmail: Text(userEmail),
               currentAccountPicture: CircleAvatar(
-                backgroundColor: Colors.white,
-                child: Text(userEmail[0].toUpperCase(),
-                    style: const TextStyle(fontSize: 24, color: Colors.teal)),
-              ),
+                  backgroundColor: Colors.white,
+                  child: Text(userEmail[0].toUpperCase(),
+                      style:
+                          const TextStyle(fontSize: 24, color: Colors.teal))),
               decoration: const BoxDecoration(color: Colors.teal),
             ),
+
+            ListTile(
+              leading: const Icon(Icons.calendar_month, color: Colors.blue),
+              title: const Text('My Appointments'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const PatientAppointmentsScreen()));
+              },
+            ),
+
+            // ✅ NEW: Doctor Messages (Coming Soon)
+            ListTile(
+              leading:
+                  const Icon(Icons.chat_bubble_outline, color: Colors.purple),
+              title: const Text('Doctor Messages'),
+              subtitle: const Text("Coming Soon",
+                  style: TextStyle(fontSize: 10, color: Colors.grey)),
+              onTap: () {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text("Doctor Chat feature is coming soon!"),
+                  backgroundColor: Colors.purple,
+                ));
+              },
+            ),
+
+            const Divider(),
+
             ListTile(
               leading: const Icon(Icons.logout, color: Colors.red),
               title: const Text('Log Out', style: TextStyle(color: Colors.red)),
               onTap: () async {
-                Navigator.pop(context); // Close drawer
+                Navigator.pop(context);
                 await _supabase.auth.signOut();
-                // If using AuthWrapper in main.dart, it will auto-redirect.
-                // If not, you might need: Navigator.pushReplacement(...)
               },
             ),
           ],
@@ -168,21 +175,7 @@ class _HomeScreenState extends State<HomeScreen> {
           : _error != null
               ? Center(child: Text(_error!))
               : _doctors.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.local_hospital_outlined,
-                              size: 64, color: Colors.grey),
-                          const SizedBox(height: 16),
-                          const Text("No doctors found nearby."),
-                          const SizedBox(height: 8),
-                          TextButton(
-                              onPressed: _fetchNearbyDoctors,
-                              child: const Text("Refresh")),
-                        ],
-                      ),
-                    )
+                  ? const Center(child: Text("No doctors found nearby."))
                   : RefreshIndicator(
                       onRefresh: _fetchNearbyDoctors,
                       child: ListView.builder(
@@ -197,53 +190,25 @@ class _HomeScreenState extends State<HomeScreen> {
                                 horizontal: 10, vertical: 5),
                             child: ListTile(
                               leading: CircleAvatar(
-                                backgroundColor: Colors.teal.shade100,
-                                child: Text(doctor['full_name'][0],
-                                    style: const TextStyle(color: Colors.teal)),
-                              ),
+                                  backgroundColor: Colors.teal.shade100,
+                                  child: Text(doctor['full_name'][0])),
                               title: Text(doctor['full_name'],
                                   style: const TextStyle(
                                       fontWeight: FontWeight.bold)),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(doctor['specialty'],
-                                      style: const TextStyle(
-                                          color: Colors.black87)),
-                                  Row(
-                                    children: [
-                                      Icon(Icons.location_on,
-                                          size: 14, color: Colors.grey[600]),
-                                      const SizedBox(width: 4),
-                                      Expanded(
-                                        child: Text(
-                                          "${doctor['clinic_name']} • $distKm km",
-                                          style: TextStyle(
-                                              color: Colors.grey[600],
-                                              fontSize: 12),
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
+                              subtitle: Text(
+                                  "${doctor['specialty']} • ${doctor['clinic_name']} • $distKm km"),
                               trailing: IconButton(
-                                icon: const Icon(Icons.directions,
-                                    color: Colors.blue),
-                                onPressed: () =>
-                                    _openMap(doctor['lat'], doctor['long']),
-                              ),
+                                  icon: const Icon(Icons.directions,
+                                      color: Colors.blue),
+                                  onPressed: () =>
+                                      _openMap(doctor['lat'], doctor['long'])),
                               onTap: () {
                                 Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => BookingScreen(
-                                      doctorId: doctor['id'],
-                                      doctorName: doctor['full_name'],
-                                    ),
-                                  ),
-                                );
+                                    context,
+                                    MaterialPageRoute(
+                                        builder: (_) => BookingScreen(
+                                            doctorId: doctor['id'],
+                                            doctorName: doctor['full_name'])));
                               },
                             ),
                           );

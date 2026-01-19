@@ -5,18 +5,9 @@ import 'package:intl/intl.dart';
 class BookingScreen extends StatefulWidget {
   final String doctorId;
   final String doctorName;
-  final int slotDuration; // e.g., 30 minutes
-  final String startTime; // e.g., "09:00:00"
-  final String endTime; // e.g., "17:00:00"
 
-  const BookingScreen({
-    super.key,
-    required this.doctorId,
-    required this.doctorName,
-    this.slotDuration = 30,
-    this.startTime = "09:00:00",
-    this.endTime = "17:00:00",
-  });
+  const BookingScreen(
+      {super.key, required this.doctorId, required this.doctorName});
 
   @override
   State<BookingScreen> createState() => _BookingScreenState();
@@ -24,102 +15,82 @@ class BookingScreen extends StatefulWidget {
 
 class _BookingScreenState extends State<BookingScreen> {
   DateTime _selectedDate = DateTime.now();
-  List<String> _bookedTimes = []; // Times that are already taken
-  String? _selectedTimeSlot;
+  String? _selectedSlot;
   bool _isLoading = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _fetchBookedSlots();
-  }
-
-  // 1. Fetch existing appointments for the selected date
-  Future<void> _fetchBookedSlots() async {
-    final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-
-    final response = await Supabase.instance.client
-        .from('appointments')
-        .select('start_time')
-        .eq('doctor_id', widget.doctorId)
-        .eq('appointment_date', dateStr);
-
-    setState(() {
-      _bookedTimes = (response as List)
-          .map((e) => e['start_time']
-              .toString()
-              .substring(0, 5)) // Format "09:30:00" -> "09:30"
-          .toList();
-      _selectedTimeSlot = null; // Reset selection on date change
-    });
-  }
-
-  // 2. Generate list of time slots (e.g., 09:00, 09:30...)
+  // 🕒 Time Slot Generator (30-minute intervals)
   List<String> _generateTimeSlots() {
     List<String> slots = [];
+    final now = DateTime.now();
 
-    // Parse start/end times
-    DateTime current = DateFormat("HH:mm:ss").parse(widget.startTime);
-    DateTime end = DateFormat("HH:mm:ss").parse(widget.endTime);
+    // Define working hours (e.g., 9:00 AM to 5:00 PM)
+    // We use a temporary DateTime object to manipulate the time easily
+    DateTime startTime = DateTime(
+        _selectedDate.year, _selectedDate.month, _selectedDate.day, 9, 0);
+    DateTime endTime = DateTime(
+        _selectedDate.year, _selectedDate.month, _selectedDate.day, 17, 0);
 
-    // Loop to add slots
-    while (current.isBefore(end)) {
-      String formattedTime = DateFormat("HH:mm").format(current);
-      slots.add(formattedTime);
-      current = current.add(Duration(minutes: widget.slotDuration));
+    // Loop until we reach the end time
+    while (startTime.isBefore(endTime)) {
+      DateTime slotEnd = startTime.add(const Duration(minutes: 30));
+
+      // 🛡️ Logic: If date is TODAY, skip slots that have already passed
+      if (_selectedDate.year == now.year &&
+          _selectedDate.month == now.month &&
+          _selectedDate.day == now.day) {
+        // If the START of the slot is in the past, skip it
+        if (startTime.isBefore(now)) {
+          startTime = slotEnd; // Move to next slot
+          continue;
+        }
+      }
+
+      // Format: "09:00 - 09:30"
+      String startStr = DateFormat('HH:mm').format(startTime);
+      String endStr = DateFormat('HH:mm').format(slotEnd);
+
+      slots.add("$startStr - $endStr");
+
+      // Increment loop by 30 minutes for the next slot
+      startTime = slotEnd;
     }
     return slots;
   }
 
-  // 3. Confirm Booking
-  Future<void> _confirmBooking() async {
-    if (_selectedTimeSlot == null) return;
-
+  Future<void> _bookAppointment() async {
+    if (_selectedSlot == null) return;
     setState(() => _isLoading = true);
-    final user = Supabase.instance.client.auth.currentUser;
 
     try {
-      // Calculate End Time (Start + Duration)
-      DateTime start = DateFormat("HH:mm").parse(_selectedTimeSlot!);
-      DateTime end = start.add(Duration(minutes: widget.slotDuration));
-      String endTimeStr = DateFormat("HH:mm:ss").format(end);
-      String startTimeStr = "$_selectedTimeSlot:00";
+      final userId = Supabase.instance.client.auth.currentUser!.id;
 
-      // Attempt Insert
+      // Split string "09:00 - 09:30"
+      final timeParts = _selectedSlot!.split(' - ');
+      final startTime = timeParts[0]; // "09:00"
+      final endTime = timeParts[1]; // "09:30"
+
       await Supabase.instance.client.from('appointments').insert({
         'doctor_id': widget.doctorId,
-        'patient_id': user!.id,
+        'patient_id': userId,
         'appointment_date': DateFormat('yyyy-MM-dd').format(_selectedDate),
-        'start_time': startTimeStr,
-        'end_time': endTimeStr,
+        'start_time': "$startTime:00", // Add seconds for Time format
+        'end_time': "$endTime:00",
+        'status': 'pending'
       });
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text("Booking Confirmed!"),
-              backgroundColor: Colors.green),
-        );
-        Navigator.pop(context); // Go back to Home
-      }
-    } on PostgrestException catch (e) {
-      // 4. Handle Conflicts (The Unique Constraint we added in SQL)
-      if (e.code == '23505') {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text("This slot was just taken! Please pick another."),
-              backgroundColor: Colors.orange),
-        );
-        _fetchBookedSlots(); // Refresh UI to show the new taken slot
-      } else {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Error: ${e.message}")));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text("Booking Request Sent!"),
+            backgroundColor: Colors.green));
+        Navigator.pop(context);
       }
     } catch (e) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text("Error: $e")));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
+      }
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -128,87 +99,85 @@ class _BookingScreenState extends State<BookingScreen> {
     final slots = _generateTimeSlots();
 
     return Scaffold(
-      appBar: AppBar(title: Text("Book ${widget.doctorName}")),
-      body: Column(
-        children: [
-          // Date Picker
-          CalendarDatePicker(
-            initialDate: _selectedDate,
-            firstDate: DateTime.now(),
-            lastDate: DateTime.now().add(const Duration(days: 30)),
-            onDateChanged: (newDate) {
-              setState(() => _selectedDate = newDate);
-              _fetchBookedSlots();
-            },
-          ),
-          const Divider(),
-          const Padding(
-            padding: EdgeInsets.all(8.0),
-            child: Text("Available Slots",
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          ),
-
-          // Time Slots Grid
-          Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.all(10),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 4,
-                  childAspectRatio: 2.5,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10),
-              itemCount: slots.length,
-              itemBuilder: (context, index) {
-                final time = slots[index];
-                final isBooked = _bookedTimes.contains(time);
-                final isSelected = _selectedTimeSlot == time;
-
-                return GestureDetector(
-                  onTap: isBooked
-                      ? null
-                      : () => setState(() => _selectedTimeSlot = time),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: isBooked
-                          ? Colors.grey[300]
-                          : (isSelected ? Colors.blue : Colors.white),
-                      border: Border.all(
-                          color: isBooked ? Colors.grey : Colors.blue),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      time,
-                      style: TextStyle(
-                        color: isBooked
-                            ? Colors.grey
-                            : (isSelected ? Colors.white : Colors.black),
-                        decoration:
-                            isBooked ? TextDecoration.lineThrough : null,
-                      ),
-                    ),
-                  ),
+      appBar: AppBar(title: Text("Book with ${widget.doctorName}")),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text("Select Date",
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            InkWell(
+              onTap: () async {
+                final picked = await showDatePicker(
+                  context: context,
+                  initialDate: DateTime.now(),
+                  firstDate: DateTime.now(),
+                  lastDate: DateTime.now().add(const Duration(days: 30)),
                 );
+                if (picked != null)
+                  setState(() {
+                    _selectedDate = picked;
+                    _selectedSlot = null;
+                  });
               },
-            ),
-          ),
-
-          // Confirm Button
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _selectedTimeSlot == null || _isLoading
-                    ? null
-                    : _confirmBooking,
-                child: _isLoading
-                    ? const CircularProgressIndicator()
-                    : const Text("Confirm Appointment"),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(vertical: 15, horizontal: 10),
+                decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey),
+                    borderRadius: BorderRadius.circular(8)),
+                child: Row(
+                  children: [
+                    const Icon(Icons.calendar_today),
+                    const SizedBox(width: 10),
+                    Text(DateFormat('yyyy-MM-dd').format(_selectedDate)),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+            const SizedBox(height: 20),
+            const Text("Available Slots (30 mins)",
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            slots.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(8.0),
+                    child: Text("No slots available.",
+                        style: TextStyle(color: Colors.red)))
+                : Wrap(
+                    spacing: 10,
+                    runSpacing: 10, // Adds vertical space between rows
+                    children: slots.map((slot) {
+                      return ChoiceChip(
+                        label: Text(slot,
+                            style: const TextStyle(
+                                fontSize: 12)), // Smaller text to fit
+                        selected: _selectedSlot == slot,
+                        onSelected: (selected) => setState(
+                            () => _selectedSlot = selected ? slot : null),
+                      );
+                    }).toList(),
+                  ),
+            const Spacer(),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: (_selectedSlot == null || _isLoading)
+                    ? null
+                    : _bookAppointment,
+                child: _isLoading
+                    ? const CircularProgressIndicator()
+                    : const Text("CONFIRM BOOKING"),
+              ),
+            ),
+            const SizedBox(
+              height: 50,
+            ),
+          ],
+        ),
       ),
     );
   }
