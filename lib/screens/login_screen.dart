@@ -195,8 +195,8 @@ class _LoginScreenState extends State<LoginScreen> {
                         onPressed: () => setState(() => _isLogin = !_isLogin),
                         child: Text(
                           _isLogin
-                              ? "New here? Create Account"
-                              : "Already have an account? Login",
+                              ? "New here? Let's Create Account"
+                              : "Already have an account? Let's Login",
                           style: const TextStyle(color: Colors.teal),
                         ),
                       )

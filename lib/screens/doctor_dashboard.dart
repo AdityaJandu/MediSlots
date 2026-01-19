@@ -22,13 +22,25 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
   late RealtimeChannel _appointmentsChannel;
 
   // Controllers
-  final _specialtyController = TextEditingController();
   final _clinicNameController = TextEditingController();
   final _addressController = TextEditingController();
   final _latController = TextEditingController();
   final _lngController = TextEditingController();
 
-  // Time Variables (formatted strings for display)
+  // 🔽 NEW: Dropdown Value for Specialty
+  // Must match the list in HomeScreen exactly!
+  final List<String> _specialtyOptions = [
+    "General",
+    "Dentist",
+    "Cardiologist",
+    "Dermatologist",
+    "Neurologist",
+    "Pediatrician",
+    "Orthopedist"
+  ];
+  String? _selectedSpecialty;
+
+  // Time Variables
   TimeOfDay _startTime = const TimeOfDay(hour: 9, minute: 0);
   TimeOfDay _endTime = const TimeOfDay(hour: 17, minute: 0);
   final _startController = TextEditingController(text: "09:00 AM");
@@ -102,8 +114,15 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
 
   void _loadProfileData(Map<String, dynamic> data) {
     _clinicNameController.text = data['clinic_name'] ?? '';
-    _specialtyController.text = data['specialty'] ?? '';
     _addressController.text = data['clinic_address'] ?? '';
+
+    // 🔽 Load Saved Specialty safely
+    String savedSpec = data['specialty'] ?? 'General';
+    if (_specialtyOptions.contains(savedSpec)) {
+      _selectedSpecialty = savedSpec;
+    } else {
+      _selectedSpecialty = "General"; // Fallback if data is weird
+    }
 
     if (data['location'] != null) {
       final loc = data['location']
@@ -141,7 +160,6 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
           _loadProfileData(data);
           _fetchAppointments();
         } else {
-          // If partial data exists (like from sign up), load it
           if (data != null) _loadProfileData(data);
           _isProfileComplete = false;
           _isLoading = false;
@@ -186,7 +204,10 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
   }
 
   Future<void> _saveProfile() async {
-    if (_latController.text.isEmpty || _clinicNameController.text.isEmpty) {
+    // Validation
+    if (_latController.text.isEmpty ||
+        _clinicNameController.text.isEmpty ||
+        _selectedSpecialty == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text("Please fill all fields and get location.")));
       return;
@@ -194,16 +215,25 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
     setState(() => _isLoading = true);
     final userId = _supabase.auth.currentUser!.id;
 
+    // 🛠️ FIX: Format minutes correctly (e.g., 5:05 instead of 5:5)
+    final startHour = _startTime.hour.toString().padLeft(2, '0');
+    final startMin = _startTime.minute.toString().padLeft(2, '0');
+
+    final endHour = _endTime.hour.toString().padLeft(2, '0');
+    final endMin = _endTime.minute.toString().padLeft(2, '0');
+
     final updateData = {
-      'specialty': _specialtyController.text,
+      'specialty': _selectedSpecialty,
       'clinic_name': _clinicNameController.text,
       'clinic_address': _addressController.text,
-      'work_start_time': "${_startTime.hour}:00:00",
-      'work_end_time': "${_endTime.hour}:00:00",
+
+      // 🚀 CRITICAL FIX: Save the actual minutes!
+      'work_start_time': "$startHour:$startMin:00",
+      'work_end_time': "$endHour:$endMin:00",
+
       'location': 'POINT(${_lngController.text} ${_latController.text})',
     };
 
-    // Upsert works for both insert and update
     await _supabase.from('doctors').upsert({'id': userId, ...updateData});
 
     setState(() {
@@ -246,7 +276,6 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Header
             const Text("Tell us about your practice",
                 style: TextStyle(
                     fontSize: 22,
@@ -256,7 +285,6 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
                 style: TextStyle(color: Colors.grey)),
             const SizedBox(height: 24),
 
-            // Card 1: Basic Info
             _buildSectionHeader("Clinic Details"),
             const SizedBox(height: 10),
             TextField(
@@ -265,14 +293,25 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
                     labelText: "Clinic Name",
                     prefixIcon: Icon(Icons.local_hospital))),
             const SizedBox(height: 16),
-            TextField(
-                controller: _specialtyController,
-                decoration: const InputDecoration(
-                    labelText: "Specialty (e.g. Dentist)",
-                    prefixIcon: Icon(Icons.badge))),
+
+            // 🔽 REPLACED TEXTFIELD WITH DROPDOWN
+            DropdownButtonFormField<String>(
+              value: _selectedSpecialty,
+              decoration: const InputDecoration(
+                labelText: "Specialty",
+                prefixIcon: Icon(Icons.badge),
+                border: OutlineInputBorder(),
+              ),
+              items: _specialtyOptions.map((String spec) {
+                return DropdownMenuItem(value: spec, child: Text(spec));
+              }).toList(),
+              onChanged: (newValue) {
+                setState(() => _selectedSpecialty = newValue);
+              },
+            ),
+
             const SizedBox(height: 24),
 
-            // Card 2: Location
             _buildSectionHeader("Address & Location"),
             const SizedBox(height: 10),
             TextField(
@@ -282,7 +321,6 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
                     labelText: "Full Address", prefixIcon: Icon(Icons.map))),
             const SizedBox(height: 16),
 
-            // Location Detector Card
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -318,7 +356,6 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
             ),
             const SizedBox(height: 24),
 
-            // Card 3: Timings
             _buildSectionHeader("Work Hours"),
             const SizedBox(height: 10),
             Row(
@@ -374,12 +411,10 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // 🆕 SHOW SETUP FORM IF PROFILE INCOMPLETE OR EDITING
     if (!_isProfileComplete || _isEditingProfile) {
       return _buildSetupForm();
     }
 
-    // --- MAIN DASHBOARD ---
     return Scaffold(
       appBar: AppBar(title: const Text("Doctor Dashboard")),
       drawer: Drawer(
@@ -429,19 +464,21 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
       ),
       body: _appointments.isEmpty
           ? const Center(child: Text("No appointments yet."))
-          : ListView.builder(
-              padding: const EdgeInsets.only(top: 10),
-              itemCount: _appointments.length,
-              itemBuilder: (context, index) {
-                final appt = _appointments[index];
-                // ✅ Using the reusable card we built earlier
-                return AppointmentCard(
-                  appointment: appt,
-                  isDoctor: true,
-                  onAccept: () => _updateStatus(appt['id'], 'confirmed'),
-                  onReject: () => _updateStatus(appt['id'], 'rejected'),
-                );
-              },
+          : RefreshIndicator(
+              onRefresh: _fetchAppointments,
+              child: ListView.builder(
+                padding: const EdgeInsets.only(top: 10),
+                itemCount: _appointments.length,
+                itemBuilder: (context, index) {
+                  final appt = _appointments[index];
+                  return AppointmentCard(
+                    appointment: appt,
+                    isDoctor: true,
+                    onAccept: () => _updateStatus(appt['id'], 'confirmed'),
+                    onReject: () => _updateStatus(appt['id'], 'rejected'),
+                  );
+                },
+              ),
             ),
     );
   }

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:medislots/services/notification_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import 'chat_screen.dart';
 
 class BookingScreen extends StatefulWidget {
   final String doctorId;
@@ -17,9 +19,9 @@ class _BookingScreenState extends State<BookingScreen> {
   DateTime _selectedDate = DateTime.now();
   String? _selectedSlot;
   bool _isLoading = false;
-  bool _isFetchingSlots = true; // Start true to show loading initially
+  bool _isFetchingSlots = true;
 
-  // 🕒 Dynamic Working Hours (Default to 9-5 just in case)
+  // Doctor Hours (Defaults)
   TimeOfDay _openTime = const TimeOfDay(hour: 9, minute: 0);
   TimeOfDay _closeTime = const TimeOfDay(hour: 17, minute: 0);
 
@@ -28,10 +30,10 @@ class _BookingScreenState extends State<BookingScreen> {
   @override
   void initState() {
     super.initState();
-    _fetchDoctorDetails(); // 1. Get Doctor's actual hours first
+    NotificationService().requestPermissions();
+    _fetchDoctorDetails();
   }
 
-  // 🆕 Fetch Doctor's Open/Close times
   Future<void> _fetchDoctorDetails() async {
     try {
       final data = await Supabase.instance.client
@@ -53,18 +55,16 @@ class _BookingScreenState extends State<BookingScreen> {
                 TimeOfDay(hour: int.parse(t[0]), minute: int.parse(t[1]));
           }
         });
-        // After getting hours, fetch booked slots
         _fetchBookedSlots();
       }
     } catch (e) {
       debugPrint("Error fetching doctor details: $e");
-      _fetchBookedSlots(); // Proceed even if details fail (uses default 9-5)
+      _fetchBookedSlots();
     }
   }
 
   Future<void> _fetchBookedSlots() async {
     setState(() => _isFetchingSlots = true);
-
     final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
 
     final response = await Supabase.instance.client
@@ -77,7 +77,6 @@ class _BookingScreenState extends State<BookingScreen> {
     final List<String> loadedTimes = [];
     for (var record in response) {
       String time = record['start_time'].toString();
-      // Format "09:00:00" -> "09:00"
       if (time.length > 5) time = time.substring(0, 5);
       loadedTimes.add(time);
     }
@@ -95,34 +94,30 @@ class _BookingScreenState extends State<BookingScreen> {
     List<String> slots = [];
     final now = DateTime.now();
 
-    // 🆕 Use the Doctor's specific Open/Close times
-    DateTime startTime = DateTime(_selectedDate.year, _selectedDate.month,
+    DateTime currentSlot = DateTime(_selectedDate.year, _selectedDate.month,
         _selectedDate.day, _openTime.hour, _openTime.minute);
 
-    DateTime endTime = DateTime(_selectedDate.year, _selectedDate.month,
+    DateTime closingTime = DateTime(_selectedDate.year, _selectedDate.month,
         _selectedDate.day, _closeTime.hour, _closeTime.minute);
 
-    while (startTime.isBefore(endTime)) {
-      DateTime slotEnd = startTime.add(const Duration(minutes: 30));
+    while (currentSlot.isBefore(closingTime)) {
+      DateTime slotEnd = currentSlot.add(const Duration(minutes: 30));
 
-      // Don't go past the closing time
-      if (slotEnd.isAfter(endTime)) break;
+      if (slotEnd.isAfter(closingTime)) break;
 
-      // Check past time (if today)
       if (_selectedDate.year == now.year &&
           _selectedDate.month == now.month &&
           _selectedDate.day == now.day) {
-        if (startTime.isBefore(now)) {
-          startTime = slotEnd;
+        if (currentSlot.isBefore(now)) {
+          currentSlot = slotEnd;
           continue;
         }
       }
 
-      String startStr = DateFormat('HH:mm').format(startTime);
+      String startStr = DateFormat('HH:mm').format(currentSlot);
       String endStr = DateFormat('HH:mm').format(slotEnd);
-
       slots.add("$startStr - $endStr");
-      startTime = slotEnd;
+      currentSlot = slotEnd;
     }
     return slots;
   }
@@ -134,15 +129,35 @@ class _BookingScreenState extends State<BookingScreen> {
     try {
       final userId = Supabase.instance.client.auth.currentUser!.id;
       final timeParts = _selectedSlot!.split(' - ');
+      final startStr = "${timeParts[0]}:00";
 
-      await Supabase.instance.client.from('appointments').insert({
-        'doctor_id': widget.doctorId,
-        'patient_id': userId,
-        'appointment_date': DateFormat('yyyy-MM-dd').format(_selectedDate),
-        'start_time': "${timeParts[0]}:00",
-        'end_time': "${timeParts[1]}:00",
-        'status': 'pending'
-      });
+      final response = await Supabase.instance.client
+          .from('appointments')
+          .insert({
+            'doctor_id': widget.doctorId,
+            'patient_id': userId,
+            'appointment_date': DateFormat('yyyy-MM-dd').format(_selectedDate),
+            'start_time': startStr,
+            'end_time': "${timeParts[1]}:00",
+            'status': 'pending'
+          })
+          .select()
+          .single();
+
+      try {
+        final t = timeParts[0].split(':');
+        final appointmentDateTime = DateTime(
+            _selectedDate.year,
+            _selectedDate.month,
+            _selectedDate.day,
+            int.parse(t[0]),
+            int.parse(t[1]));
+
+        await NotificationService().scheduleReminder(
+            response['id'].hashCode, widget.doctorName, appointmentDateTime);
+      } catch (e) {
+        debugPrint("Notification Error: $e");
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -151,12 +166,23 @@ class _BookingScreenState extends State<BookingScreen> {
         Navigator.pop(context);
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text("Error: $e")));
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // 💬 Navigate to Chat
+  void _openChat() {
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => ChatScreen(
+                otherUserId: widget.doctorId,
+                otherUserName: widget.doctorName)));
   }
 
   @override
@@ -168,10 +194,18 @@ class _BookingScreenState extends State<BookingScreen> {
         title: const Text("Book Appointment"),
         backgroundColor: Colors.teal,
         foregroundColor: Colors.white,
+        actions: [
+          // 💬 CHAT BUTTON (Direct Access)
+          IconButton(
+            icon: const Icon(Icons.chat_bubble_outline),
+            tooltip: "Message Doctor",
+            onPressed: _openChat,
+          ),
+        ],
       ),
       body: Column(
         children: [
-          // Header
+          // Doctor Info Header
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(20),
@@ -186,11 +220,18 @@ class _BookingScreenState extends State<BookingScreen> {
                         color: Colors.white,
                         fontSize: 24,
                         fontWeight: FontWeight.bold)),
-                // 🆕 Show Working Hours
-                Text(
-                    "Hours: ${_openTime.format(context)} - ${_closeTime.format(context)}",
-                    style:
-                        const TextStyle(color: Colors.white70, fontSize: 12)),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.access_time,
+                        color: Colors.white70, size: 16),
+                    const SizedBox(width: 6),
+                    Text(
+                        "${_openTime.format(context)} - ${_closeTime.format(context)}",
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 14)),
+                  ],
+                )
               ],
             ),
           ),
@@ -229,6 +270,8 @@ class _BookingScreenState extends State<BookingScreen> {
                               DateFormat('EEEE, d MMMM yyyy')
                                   .format(_selectedDate),
                               style: const TextStyle(fontSize: 16)),
+                          const Spacer(),
+                          const Icon(Icons.arrow_drop_down, color: Colors.grey),
                         ],
                       ),
                     ),
@@ -236,23 +279,65 @@ class _BookingScreenState extends State<BookingScreen> {
 
                   const SizedBox(height: 24),
 
-                  const Text("Available Slots",
-                      style:
-                          TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  // Slots Grid
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("Available Slots",
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 16)),
+                      // 💡 Small tip for emergency
+                      if (slots.isEmpty && !_isFetchingSlots)
+                        TextButton.icon(
+                          onPressed: _openChat,
+                          icon: const Icon(Icons.warning_amber_rounded,
+                              size: 16, color: Colors.orange),
+                          label: const Text("Emergency? Chat",
+                              style: TextStyle(
+                                  color: Colors.orange, fontSize: 12)),
+                          style: TextButton.styleFrom(padding: EdgeInsets.zero),
+                        )
+                    ],
+                  ),
+
                   const SizedBox(height: 12),
 
                   _isFetchingSlots
-                      ? const Center(child: CircularProgressIndicator())
+                      ? const Padding(
+                          padding: EdgeInsets.all(20.0),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
                       : slots.isEmpty
-                          ? const Text("No slots available for this date.",
-                              style: TextStyle(color: Colors.red))
+                          ? Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(30),
+                              decoration: BoxDecoration(
+                                  color: Colors.grey.shade50,
+                                  borderRadius: BorderRadius.circular(12)),
+                              child: Column(
+                                children: [
+                                  Icon(Icons.event_busy,
+                                      size: 40, color: Colors.grey.shade400),
+                                  const SizedBox(height: 10),
+                                  Text("No slots available.",
+                                      style: TextStyle(
+                                          color: Colors.grey.shade600)),
+                                  const SizedBox(height: 10),
+                                  OutlinedButton.icon(
+                                    onPressed: _openChat,
+                                    icon: const Icon(Icons.chat),
+                                    label: const Text("Request Slot via Chat"),
+                                  )
+                                ],
+                              ),
+                            )
                           : GridView.builder(
                               shrinkWrap: true,
                               physics: const NeverScrollableScrollPhysics(),
                               gridDelegate:
                                   const SliverGridDelegateWithFixedCrossAxisCount(
                                 crossAxisCount: 3,
-                                childAspectRatio: 2.5,
+                                childAspectRatio: 2.2,
                                 crossAxisSpacing: 10,
                                 mainAxisSpacing: 10,
                               ),
@@ -272,7 +357,7 @@ class _BookingScreenState extends State<BookingScreen> {
                                     alignment: Alignment.center,
                                     decoration: BoxDecoration(
                                       color: isBooked
-                                          ? Colors.grey[200]
+                                          ? Colors.grey[100]
                                           : (isSelected
                                               ? Colors.teal
                                               : Colors.white),
@@ -319,9 +404,22 @@ class _BookingScreenState extends State<BookingScreen> {
                 onPressed: (_selectedSlot == null || _isLoading)
                     ? null
                     : _bookAppointment,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.teal,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  elevation: 2,
+                ),
                 child: _isLoading
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text("CONFIRM BOOKING"),
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                            color: Colors.white, strokeWidth: 2))
+                    : const Text("CONFIRM BOOKING",
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold)),
               ),
             ),
           ),
