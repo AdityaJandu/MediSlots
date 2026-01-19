@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:geolocator/geolocator.dart';
-import 'package:medislots/screens/conversations_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'booking_screen.dart';
 import 'patient_appointments_screen.dart';
+import 'conversations_screen.dart'; // Ensure this import exists
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,6 +20,9 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   String? _error;
 
+  // 🔔 REALTIME CHANNEL VARIABLE
+  late RealtimeChannel _appointmentsChannel;
+
   // 📍 Fallback Location (New Delhi)
   final double _defaultLat = 28.6139;
   final double _defaultLong = 77.2090;
@@ -28,6 +31,58 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _fetchNearbyDoctors();
+    _setupRealtimeListeners(); // 🎧 Start Listening for Status Updates
+  }
+
+  @override
+  void dispose() {
+    _supabase.removeChannel(_appointmentsChannel); // 🧹 Cleanup
+    super.dispose();
+  }
+
+  // 🎧 NEW: LISTEN FOR BOOKING CONFIRMATIONS
+  void _setupRealtimeListeners() {
+    final myUserId = _supabase.auth.currentUser!.id;
+
+    _appointmentsChannel = _supabase
+        .channel('public:appointments')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'appointments',
+          filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'patient_id',
+              value: myUserId),
+          callback: (payload) {
+            final newStatus = payload.newRecord['status'];
+            final oldStatus = payload.oldRecord['status'];
+
+            // Notify only if status changed
+            if (newStatus != oldStatus) {
+              if (newStatus == 'confirmed') {
+                _showSnackBar(
+                    "Your appointment has been CONFIRMED!", Colors.green);
+              } else if (newStatus == 'rejected') {
+                _showSnackBar("Your appointment was REJECTED.", Colors.red);
+              }
+            }
+          },
+        )
+        .subscribe();
+  }
+
+  void _showSnackBar(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content:
+            Text(message, style: const TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: color,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   Future<void> _fetchNearbyDoctors() async {
@@ -103,9 +158,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openMap(double lat, double long) async {
+    // 🛠️ Fixed Google Maps URL to actually point to the doctor's location
     final googleUrl =
-        Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$long');
-    if (await canLaunchUrl(googleUrl)) await launchUrl(googleUrl);
+        Uri.parse("https://www.google.com/maps/search/?api=1&query=$lat,$long");
+    if (await canLaunchUrl(googleUrl)) {
+      await launchUrl(googleUrl, mode: LaunchMode.externalApplication);
+    } else {
+      _showSnackBar("Could not open maps", Colors.red);
+    }
   }
 
   @override
@@ -124,12 +184,12 @@ class _HomeScreenState extends State<HomeScreen> {
               accountEmail: Text(userEmail),
               currentAccountPicture: CircleAvatar(
                   backgroundColor: Colors.white,
-                  child: Text(userEmail[0].toUpperCase(),
+                  child: Text(
+                      userEmail.isNotEmpty ? userEmail[0].toUpperCase() : "?",
                       style:
                           const TextStyle(fontSize: 24, color: Colors.teal))),
               decoration: const BoxDecoration(color: Colors.teal),
             ),
-
             ListTile(
               leading: const Icon(Icons.calendar_month, color: Colors.blue),
               title: const Text('My Appointments'),
@@ -141,23 +201,19 @@ class _HomeScreenState extends State<HomeScreen> {
                         builder: (_) => const PatientAppointmentsScreen()));
               },
             ),
-
-            // Doctor Messages
             ListTile(
               leading:
                   const Icon(Icons.chat_bubble_outline, color: Colors.purple),
               title: const Text('Doctor Messages'),
               onTap: () {
-                Navigator.pop(context); // Close drawer
+                Navigator.pop(context);
                 Navigator.push(
                     context,
                     MaterialPageRoute(
                         builder: (_) => const ConversationsScreen()));
               },
             ),
-
             const Divider(),
-
             ListTile(
               leading: const Icon(Icons.logout, color: Colors.red),
               title: const Text('Log Out', style: TextStyle(color: Colors.red)),
@@ -183,11 +239,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           final doctor = _doctors[index];
                           final distMeters = doctor['dist_meters'] as num;
                           final distKm = (distMeters / 1000).toStringAsFixed(1);
-
-                          // ... (Imports remain the same) ...
-
-// INSIDE build() > body > ListView.builder:
-// Replace the existing return Card(...) with this:
 
                           return Container(
                             margin: const EdgeInsets.symmetric(
@@ -234,7 +285,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                         ),
                                         child: Center(
                                           child: Text(
-                                            doctor['full_name'][0],
+                                            doctor['full_name'].isNotEmpty
+                                                ? doctor['full_name'][0]
+                                                : "?",
                                             style: TextStyle(
                                                 fontSize: 24,
                                                 fontWeight: FontWeight.bold,
@@ -259,7 +312,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                             ),
                                             const SizedBox(height: 4),
                                             Text(
-                                              doctor['specialty'],
+                                              doctor['specialty'] ?? 'General',
                                               style: TextStyle(
                                                   fontSize: 14,
                                                   color: Colors.teal.shade600,
@@ -274,7 +327,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 const SizedBox(width: 2),
                                                 Expanded(
                                                   child: Text(
-                                                    doctor['clinic_name'],
+                                                    doctor['clinic_name'] ??
+                                                        'Clinic',
                                                     style: TextStyle(
                                                         fontSize: 13,
                                                         color:
