@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:medislots/chat_screen.dart';
+import 'package:medislots/widgets/appointment_card.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import 'conversations_screen.dart';
 
 class DoctorDashboard extends StatefulWidget {
   const DoctorDashboard({super.key});
@@ -15,7 +16,7 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
   final _supabase = Supabase.instance.client;
   bool _isProfileComplete = false;
   bool _isLoading = true;
-  bool _isEditingProfile = false; // 🆕 Track if we are editing
+  bool _isEditingProfile = false;
 
   List<Map<String, dynamic>> _appointments = [];
   late RealtimeChannel _appointmentsChannel;
@@ -26,8 +27,12 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
   final _addressController = TextEditingController();
   final _latController = TextEditingController();
   final _lngController = TextEditingController();
+
+  // Time Variables (formatted strings for display)
   TimeOfDay _startTime = const TimeOfDay(hour: 9, minute: 0);
   TimeOfDay _endTime = const TimeOfDay(hour: 17, minute: 0);
+  final _startController = TextEditingController(text: "09:00 AM");
+  final _endController = TextEditingController(text: "05:00 PM");
 
   @override
   void initState() {
@@ -72,7 +77,7 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
             backgroundColor:
                 newStatus == 'confirmed' ? Colors.green : Colors.red));
       }
-      _fetchAppointments(); // Refresh UI immediately
+      _fetchAppointments();
     } catch (e) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text("Error: $e")));
@@ -95,13 +100,11 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
     }
   }
 
-  // 🆕 Load data into controllers so we can edit it
   void _loadProfileData(Map<String, dynamic> data) {
     _clinicNameController.text = data['clinic_name'] ?? '';
     _specialtyController.text = data['specialty'] ?? '';
     _addressController.text = data['clinic_address'] ?? '';
 
-    // Parse Location (POINT(long lat))
     if (data['location'] != null) {
       final loc = data['location']
           .toString()
@@ -114,14 +117,15 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
       }
     }
 
-    // Parse Times
     if (data['work_start_time'] != null) {
       final t = data['work_start_time'].toString().split(':');
       _startTime = TimeOfDay(hour: int.parse(t[0]), minute: int.parse(t[1]));
+      _startController.text = _startTime.format(context);
     }
     if (data['work_end_time'] != null) {
       final t = data['work_end_time'].toString().split(':');
       _endTime = TimeOfDay(hour: int.parse(t[0]), minute: int.parse(t[1]));
+      _endController.text = _endTime.format(context);
     }
   }
 
@@ -132,12 +136,13 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
 
     if (mounted) {
       setState(() {
-        if (data != null) {
+        if (data != null && data['location'] != null) {
           _isProfileComplete = true;
-          _loadProfileData(
-              data); // 🆕 Pre-fill form in case they want to edit later
+          _loadProfileData(data);
           _fetchAppointments();
         } else {
+          // If partial data exists (like from sign up), load it
+          if (data != null) _loadProfileData(data);
           _isProfileComplete = false;
           _isLoading = false;
         }
@@ -146,6 +151,7 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
   }
 
   Future<void> _fillCurrentLocation() async {
+    setState(() => _isLoading = true);
     try {
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -163,20 +169,28 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
 
       Position position = await Geolocator.getCurrentPosition(
           desiredAccuracy: locationSettings.accuracy);
+
       setState(() {
         _latController.text = position.latitude.toString();
         _lngController.text = position.longitude.toString();
+        _isLoading = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Coordinates Auto-filled!")));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Location Detected Successfully!"),
+          backgroundColor: Colors.green));
     } catch (e) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text("Error: $e")));
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("Location Error: $e"), backgroundColor: Colors.red));
     }
   }
 
   Future<void> _saveProfile() async {
-    if (_latController.text.isEmpty) return;
+    if (_latController.text.isEmpty || _clinicNameController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Please fill all fields and get location.")));
+      return;
+    }
     setState(() => _isLoading = true);
     final userId = _supabase.auth.currentUser!.id;
 
@@ -189,13 +203,8 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
       'location': 'POINT(${_lngController.text} ${_latController.text})',
     };
 
-    if (_isEditingProfile) {
-      // Update existing
-      await _supabase.from('doctors').update(updateData).eq('id', userId);
-    } else {
-      // Insert new
-      await _supabase.from('doctors').insert({'id': userId, ...updateData});
-    }
+    // Upsert works for both insert and update
+    await _supabase.from('doctors').upsert({'id': userId, ...updateData});
 
     setState(() {
       _isProfileComplete = true;
@@ -209,8 +218,154 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
     final picked = await showTimePicker(
         context: context, initialTime: isStart ? _startTime : _endTime);
     if (picked != null) {
-      setState(() => isStart ? _startTime = picked : _endTime = picked);
+      setState(() {
+        if (isStart) {
+          _startTime = picked;
+          _startController.text = picked.format(context);
+        } else {
+          _endTime = picked;
+          _endController.text = picked.format(context);
+        }
+      });
     }
+  }
+
+  // 🏥 UI: Profile Setup Form
+  Widget _buildSetupForm() {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_isEditingProfile ? "Edit Clinic Profile" : "Clinic Setup"),
+        leading: _isEditingProfile
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() => _isEditingProfile = false))
+            : null,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Header
+            const Text("Tell us about your practice",
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.teal)),
+            const Text("Patients need this info to find you.",
+                style: TextStyle(color: Colors.grey)),
+            const SizedBox(height: 24),
+
+            // Card 1: Basic Info
+            _buildSectionHeader("Clinic Details"),
+            const SizedBox(height: 10),
+            TextField(
+                controller: _clinicNameController,
+                decoration: const InputDecoration(
+                    labelText: "Clinic Name",
+                    prefixIcon: Icon(Icons.local_hospital))),
+            const SizedBox(height: 16),
+            TextField(
+                controller: _specialtyController,
+                decoration: const InputDecoration(
+                    labelText: "Specialty (e.g. Dentist)",
+                    prefixIcon: Icon(Icons.badge))),
+            const SizedBox(height: 24),
+
+            // Card 2: Location
+            _buildSectionHeader("Address & Location"),
+            const SizedBox(height: 10),
+            TextField(
+                controller: _addressController,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                    labelText: "Full Address", prefixIcon: Icon(Icons.map))),
+            const SizedBox(height: 16),
+
+            // Location Detector Card
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.blue.shade100)),
+              child: Row(
+                children: [
+                  const Icon(Icons.my_location, color: Colors.blue),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text("GPS Coordinates",
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.blue)),
+                        Text(
+                          _latController.text.isEmpty
+                              ? "Not detected yet"
+                              : "${_latController.text}, ${_lngController.text}",
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(
+                      onPressed: _fillCurrentLocation,
+                      child: const Text("DETECT"))
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+
+            // Card 3: Timings
+            _buildSectionHeader("Work Hours"),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _startController,
+                    readOnly: true,
+                    onTap: () => _pickTime(true),
+                    decoration: const InputDecoration(
+                        labelText: "Start Time",
+                        prefixIcon: Icon(Icons.wb_sunny_outlined)),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextField(
+                    controller: _endController,
+                    readOnly: true,
+                    onTap: () => _pickTime(false),
+                    decoration: const InputDecoration(
+                        labelText: "End Time",
+                        prefixIcon: Icon(Icons.nightlight_round)),
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 32),
+            ElevatedButton(
+              onPressed: _saveProfile,
+              style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16)),
+              child: const Text("SAVE PROFILE",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title) {
+    return Text(title,
+        style: const TextStyle(
+            fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87));
   }
 
   @override
@@ -219,69 +374,14 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // 🆕 Show Form if Profile is incomplete OR if we are explicitly editing
+    // 🆕 SHOW SETUP FORM IF PROFILE INCOMPLETE OR EDITING
     if (!_isProfileComplete || _isEditingProfile) {
-      return Scaffold(
-        appBar: AppBar(
-          title: Text(_isEditingProfile ? "Edit Profile" : "Complete Profile"),
-          leading: _isEditingProfile
-              ? IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => setState(() => _isEditingProfile = false))
-              : null,
-        ),
-        body: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Column(children: [
-              TextField(
-                  controller: _clinicNameController,
-                  decoration: const InputDecoration(labelText: "Clinic Name")),
-              TextField(
-                  controller: _specialtyController,
-                  decoration: const InputDecoration(labelText: "Specialty")),
-              TextField(
-                  controller: _addressController,
-                  decoration: const InputDecoration(labelText: "Address")),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                    child: TextField(
-                        controller: _latController,
-                        decoration:
-                            const InputDecoration(labelText: "Latitude"))),
-                const SizedBox(width: 10),
-                Expanded(
-                    child: TextField(
-                        controller: _lngController,
-                        decoration:
-                            const InputDecoration(labelText: "Longitude"))),
-              ]),
-              TextButton.icon(
-                  onPressed: _fillCurrentLocation,
-                  icon: const Icon(Icons.my_location),
-                  label: const Text("Get Location")),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                    child: TextButton(
-                        onPressed: () => _pickTime(true),
-                        child: Text("Start: ${_startTime.format(context)}"))),
-                Expanded(
-                    child: TextButton(
-                        onPressed: () => _pickTime(false),
-                        child: Text("End: ${_endTime.format(context)}"))),
-              ]),
-              const SizedBox(height: 20),
-              ElevatedButton(
-                  onPressed: _saveProfile, child: const Text("SAVE PROFILE")),
-            ])),
-      );
+      return _buildSetupForm();
     }
 
-    // --- MAIN DASHBOARD (Appointments) ---
+    // --- MAIN DASHBOARD ---
     return Scaffold(
       appBar: AppBar(title: const Text("Doctor Dashboard")),
-      // 🆕 NEW DRAWER
       drawer: Drawer(
         child: ListView(
           padding: EdgeInsets.zero,
@@ -297,26 +397,25 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
             ListTile(
               leading: const Icon(Icons.calendar_today),
               title: const Text("Appointments"),
-              onTap: () => Navigator.pop(context), // Already here
+              onTap: () => Navigator.pop(context),
             ),
             ListTile(
               leading: const Icon(Icons.edit),
-              title: const Text("Edit Profile"),
+              title: const Text("Edit Clinic Profile"),
               onTap: () {
                 Navigator.pop(context);
-                setState(
-                    () => _isEditingProfile = true); // Triggers the form view
+                setState(() => _isEditingProfile = true);
               },
             ),
             ListTile(
               leading: const Icon(Icons.chat_bubble_outline),
               title: const Text("Patient Messages"),
-              subtitle: const Text("Coming Soon",
-                  style: TextStyle(fontSize: 10, color: Colors.grey)),
               onTap: () {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Chat feature coming next!")));
+                Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const ConversationsScreen()));
               },
             ),
             const Divider(),
@@ -331,65 +430,16 @@ class _DoctorDashboardState extends State<DoctorDashboard> {
       body: _appointments.isEmpty
           ? const Center(child: Text("No appointments yet."))
           : ListView.builder(
+              padding: const EdgeInsets.only(top: 10),
               itemCount: _appointments.length,
               itemBuilder: (context, index) {
                 final appt = _appointments[index];
-                final patientName = appt['profiles']['full_name'] ?? "Unknown";
-                final status = appt['status'] ?? 'pending';
-                final time = appt['start_time'].toString().substring(0, 5);
-
-                return Card(
-                  margin:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text("📅 ${appt['appointment_date']} at $time"),
-
-                              // 💬 CHAT BUTTON
-                              IconButton(
-                                icon:
-                                    const Icon(Icons.chat, color: Colors.blue),
-                                onPressed: () {
-                                  // Doctor talks to Patient
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => ChatScreen(
-                                          otherUserId: appt['patient_id'],
-                                          otherUserName: patientName),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ],
-                          ),
-                          Text("📅 ${appt['appointment_date']} at $time"),
-                          if (status == 'pending') ...[
-                            const SizedBox(height: 10),
-                            Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  TextButton(
-                                      onPressed: () =>
-                                          _updateStatus(appt['id'], 'rejected'),
-                                      child: const Text("Reject",
-                                          style: TextStyle(color: Colors.red))),
-                                  ElevatedButton(
-                                      onPressed: () => _updateStatus(
-                                          appt['id'], 'confirmed'),
-                                      style: ElevatedButton.styleFrom(
-                                          backgroundColor: Colors.green),
-                                      child: const Text("Accept")),
-                                ])
-                          ]
-                        ]),
-                  ),
+                // ✅ Using the reusable card we built earlier
+                return AppointmentCard(
+                  appointment: appt,
+                  isDoctor: true,
+                  onAccept: () => _updateStatus(appt['id'], 'confirmed'),
+                  onReject: () => _updateStatus(appt['id'], 'rejected'),
                 );
               },
             ),
